@@ -31,6 +31,7 @@ query_log.db
 docs/
 hepler.txt
 helper.txt
+make_sample_pdf.py
 
 # ---------- editor / OS ----------
 .vscode/
