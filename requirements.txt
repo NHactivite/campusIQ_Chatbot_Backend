@@ -1,4 +1,4 @@
-fastapi==0.162.0
+﻿fastapi==0.162.0
 httpx==0.28.1
 langchain-core==1.7.4
 langchain-google-genai==4.4.2
@@ -11,4 +11,5 @@ python-socketio==5.18.0
 qdrant-client==1.20.0
 sentence-transformers==6.2.0
 uvicorn[standard]
-azure-cognitiveservices-speechlanggraph-checkpoint-sqlite
+azure-cognitiveservices-speech
+langgraph-checkpoint-sqlite==3.1.3
