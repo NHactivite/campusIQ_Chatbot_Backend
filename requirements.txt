@@ -1,0 +1,12 @@
+﻿fastapi
+uvicorn[standard]
+python-socketio
+python-dotenv
+requests
+langchain-core
+langgraph
+langgraph-checkpoint-sqlite
+langchain-google-genai
+pymupdf
+qdrant-client
+sentence-transformers
