@@ -32,6 +32,7 @@ docs/
 hepler.txt
 helper.txt
 make_sample_pdf.py
+ingest_local.py
 
 # ---------- editor / OS ----------
 .vscode/
