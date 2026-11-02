@@ -8,6 +8,8 @@ import os
 
 import jwt
 import socketio
+import base64
+from app.services.tts_service import synthesize_to_mp3
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from jwt import PyJWKClient
@@ -189,3 +191,16 @@ async def on_delete_thread(sid, data):
     session = await sio.get_session(sid)
     await asyncio.to_thread(delete_thread, session["user_id"], (data or {}).get("threadId") or "")
     await sio.emit("threads", await asyncio.to_thread(list_threads, session["user_id"]), to=sid)
+
+@sio.on("speak")
+async def on_speak(sid, data):
+    await sio.get_session(sid)  # only signed-in users get here (token checked on connect)
+    data = data or {}
+    text = str(data.get("text") or "")[:3000]
+    audio = await synthesize_to_mp3(text, data.get("language"))
+    payload = {"id": data.get("id")}
+    if audio:
+        payload["audio"] = base64.b64encode(audio).decode("ascii")
+    else:
+        payload["error"] = True
+    await sio.emit("speech", payload, to=sid)

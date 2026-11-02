@@ -227,21 +227,28 @@ def ocr_image_bytes(data: bytes, mime: str, cache_key: str) -> str:
 
 
 # ---------------- Extraction + chunking ----------------
+_WATERMARKS = ("scanned by camscanner", "camscanner", "scanned with", "scanned by")
+
+
+def _real_text(raw: str) -> str:
+    """Page text with scanner watermark lines removed."""
+    lines = [ln for ln in raw.splitlines() if not any(w in ln.lower() for w in _WATERMARKS)]
+    return "\n".join(lines).strip()
+
+
 def extract_pages(pdf_path: str) -> list[tuple[int, str]]:
-    """Text per page. Pages with almost no text are treated as scans and OCR'd."""
+    """Text per page. Pages with almost no real text (scans) are OCR'd."""
     pages = []
     base = os.path.basename(pdf_path)
     with fitz.open(pdf_path) as pdf:
         for i, page in enumerate(pdf):
-            text = page.get_text().strip()
-            if len(text) < 20:
-                print(f"  page {i + 1}: no text layer, running OCR ...")
+            text = _real_text(page.get_text())
+            if len(text) < 50:
+                print(f"  page {i + 1}: no real text layer, running OCR ...")
                 png = page.get_pixmap(dpi=200).tobytes("png")
                 text = ocr_image_bytes(png, "image/png", f"{base}.p{i + 1}")
             pages.append((i + 1, text))
     return pages
-
-
 def extract_image(image_path: str) -> list[tuple[int, str]]:
     ext = os.path.splitext(image_path)[1].lower()
     with open(image_path, "rb") as f:
