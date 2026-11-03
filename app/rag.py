@@ -38,7 +38,7 @@ load_dotenv()
 OCR_MODELS = [
     "gemini-3.1-flash-lite",   # 500 requests a day, main model
     "gemini-3.5-flash-lite",   # 500 requests a day
-    "gemini-3.8-flash",        # about 20 a day, last resort
+    "gemma-4-26b-it",        
 ]
 
 COLLECTION = "campusiq"
