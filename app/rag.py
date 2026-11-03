@@ -93,6 +93,19 @@ _bge_model = None
 _gemini_emb = None
 
 
+def _gemini_call(fn, *args):
+    for attempt in range(5):
+        try:
+            return fn(*args)
+        except Exception as e:
+            s = f"{type(e).__name__} {e}".lower()
+            if attempt == 4 or not ("429" in s or "resource_exhausted" in s or "quota" in s):
+                raise
+            wait = 5 * (attempt + 1)
+            print(f"  [embed] rate limited, retrying in {wait}s")
+            time.sleep(wait)
+
+
 def embed(texts: list[str], is_query: bool = False) -> list[list[float]]:
     global _bge_model, _gemini_emb
 
@@ -105,16 +118,14 @@ def embed(texts: list[str], is_query: bool = False) -> list[list[float]]:
                 google_api_key=os.getenv("GEMINI_API_KEY"),
             )
         if is_query:
-            return [_gemini_emb.embed_query(t) for t in texts]
-        return _gemini_emb.embed_documents(texts)
+            return [_gemini_call(_gemini_emb.embed_query, t) for t in texts]
+        return _gemini_call(_gemini_emb.embed_documents, texts)
 
     if _bge_model is None:
         from sentence_transformers import SentenceTransformer
 
         _bge_model = SentenceTransformer("BAAI/bge-m3")
     return _bge_model.encode(texts, normalize_embeddings=True).tolist()
-
-
 def ensure_collection():
     client = get_client()
     if not client.collection_exists(COLLECTION):

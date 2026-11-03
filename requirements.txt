@@ -9,7 +9,6 @@ PyMuPDF==2.0
 python-dotenv==1.2.4
 python-socketio==5.18.0
 qdrant-client==1.20.0
-sentence-transformers==6.2.0
 uvicorn[standard]
 azure-cognitiveservices-speech
 langgraph-checkpoint-sqlite==3.1.3
