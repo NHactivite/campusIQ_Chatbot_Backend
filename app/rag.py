@@ -4,7 +4,7 @@ rag.py - embeddings + Qdrant + PDF/photo ingestion (Gemini OCR) + search for Cam
 .env settings:
     EMBED_BACKEND=bge            # "bge" (local BAAI/bge-m3) or "gemini"
     GEMINI_API_KEY=...           # needed for OCR and for EMBED_BACKEND=gemini
-    GEMINI_OCR_MODEL=gemini-3.1-flash-lite   # tried first; the others in OCR_MODELS are fallbacks
+    GEMINI_OCR_MODEL=            # optional. If set, this model is tried first, then OCR_MODELS in order
     GEMINI_EMBED_MODEL=models/gemini-embedding-001
     QDRANT_URL=...               # leave empty to use a local folder
     QDRANT_API_KEY=...
@@ -33,12 +33,12 @@ from qdrant_client.models import (
 
 load_dotenv()
 
-# OCR models, tried in this order. If one is overloaded (503), out of quota (429) or does
-# not exist (404), the next one is used. Remove names that give 404 for your key.
+# OCR models in priority order: best first. A model that is out of daily quota or does
+# not exist is blocked (see _block) and the next one is used.
 OCR_MODELS = [
-    "gemini-3.5-flash-lite",  # Primary: document parsing
-    "gemini-3.1-flash-lite",  # Fallback: fast OCR
-    "gemma-4-26b-a4b-it",     # Additional vision fallback
+    "gemini-3.5-flash-lite",  # 1st: document parsing
+    "gemini-3.1-flash-lite",  # 2nd: fast OCR
+    "gemma-4-26b-a4b-it",     # 3rd: extra vision fallback
 ]
 
 COLLECTION = "campusiq"
@@ -47,7 +47,7 @@ SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.5"))
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 QDRANT_PATH = os.getenv("QDRANT_PATH", "./qdrant_data")
-OCR_MODEL = os.getenv("GEMINI_OCR_MODEL", OCR_MODELS[0])
+OCR_MODEL = os.getenv("GEMINI_OCR_MODEL") or None  # optional override, tried first
 OCR_CACHE_DIR = os.getenv("OCR_CACHE_DIR", "./ocr_cache")
 
 IMAGE_EXTS = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
@@ -124,6 +124,8 @@ def embed(texts: list[str], is_query: bool = False) -> list[list[float]]:
 
         _bge_model = SentenceTransformer("BAAI/bge-m3")
     return _bge_model.encode(texts, normalize_embeddings=True).tolist()
+
+
 def ensure_collection():
     client = get_client()
     if not client.collection_exists(COLLECTION):
@@ -144,9 +146,21 @@ def ensure_collection():
             print(f"[rag] payload index '{field}' skipped: {str(e)[:80]}")
 
 
-# ---------------- OCR (Gemini, with model fallback) ----------------
+# ---------------- OCR (Gemini, ordered fallback with blocking) ----------------
 _ocr_llms = {}
-_ocr_good_model = None  # the model that worked last; it is tried first next time
+_blocked_until = {}  # model name -> epoch seconds until which the model is skipped
+
+
+def _block(model: str, seconds: float, why: str):
+    _blocked_until[model] = time.time() + seconds
+    print(f"  [ocr] {model} skipped for {int(seconds)}s ({why})")
+
+
+def _available_models() -> list[str]:
+    """Priority order, minus models that are currently blocked."""
+    now = time.time()
+    order = list(dict.fromkeys(([OCR_MODEL] if OCR_MODEL else []) + OCR_MODELS))
+    return [m for m in order if _blocked_until.get(m, 0) <= now]
 
 
 def _content_to_text(content) -> str:
@@ -173,11 +187,6 @@ def _get_ocr_llm(model_name: str):
     return _ocr_llms[model_name]
 
 
-def _ocr_model_order() -> list[str]:
-    first = _ocr_good_model or OCR_MODEL
-    rest = [m for m in [OCR_MODEL, *OCR_MODELS] if m != first]
-    return [first] + list(dict.fromkeys(rest))
-
 def _tidy_ocr(text: str, max_chars: int = 8000) -> str:
     """Drops lines repeated many times (an OCR loop) and caps the length."""
     from collections import Counter
@@ -194,13 +203,12 @@ def _tidy_ocr(text: str, max_chars: int = 8000) -> str:
 
 
 def ocr_image_bytes(data: bytes, mime: str, cache_key: str) -> str:
-    """OCR one image with Gemini, trying several models. Result is cached in
+    """OCR one image with Gemini, trying models in priority order. Result is cached in
     ocr_cache/<cache_key>.txt. If you edit the .txt file by hand, your text is used."""
-    global _ocr_good_model
     path = _cache_path(cache_key)
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
-            return _tidy_ocr(f.read())  # <-- tidy old cached text too
+            return _tidy_ocr(f.read())
 
     from langchain_core.messages import HumanMessage
 
@@ -213,18 +221,51 @@ def ocr_image_bytes(data: bytes, mime: str, cache_key: str) -> str:
     )
 
     text, errors = None, []
-    for round_no in range(2):  # two full passes over the model list
-        for model_name in _ocr_model_order():
-            for attempt in range(2):  # one quick retry for temporary 503s
-                try:
-                    text = _content_to_text(_get_ocr_llm(model_name).invoke([msg]).content).strip()
-                    _ocr_good_model = model_name
-                    print(f"  [ocr] done with {model_name}")
+    for model_name in _available_models():
+        for attempt in range(2):  # one quick retry for temporary errors (503)
+            try:
+                out = _content_to_text(_get_ocr_llm(model_name).invoke([msg]).content).strip()
+            except Exception as e:
+                err = str(e)
+                low = err.lower()
+                errors.append(f"{model_name}: {err[:120]}")
+                print(f"  [ocr] {model_name} failed ({type(e).__name__}: {err[:100]})")
+
+                if "404" in err or "not found" in low:
+                    _block(model_name, 10**9, "model not found")
                     break
-                except Exception as e:
-                    err = str(e)
-                    errors.append(f"{model_name}: {err[:120]}")
-                    print(f"  [ocr] {model_name} failed ({type(e).__name__}: {err[:100]})")
+                if "429" in err or "resource_exhausted" in low or "quota" in low:
+                    if "perday" in low or "per day" in low or "daily" in low:
+                        _block(model_name, 24 * 3600, "daily limit reached")
+                    else:
+                        _block(model_name, 60, "rate limit")
+                    break
+                if attempt == 0:
+                    time.sleep(2)  # 503 or other temporary error: retry once, then next model
+                continue
+
+            if out:
+                text = out
+                print(f"  [ocr] done with {model_name}")
+            else:
+                errors.append(f"{model_name}: empty response")
+                print(f"  [ocr] {model_name} returned an empty response, trying next model")
+            break
+        if text is not None:
+            break
+
+    if text is None:
+        raise RuntimeError("OCR failed on all available models: " + " | ".join(errors[-4:]))
+
+    text = _tidy_ocr(text)
+    if text.strip() == "NO_TEXT":
+        text = ""
+    if text:  # never cache empty results, so Re-sync retries them
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+    return text
+
+
 # ---------------- Extraction + chunking ----------------
 _WATERMARKS = ("scanned by camscanner", "camscanner", "scanned with", "scanned by")
 
@@ -242,12 +283,16 @@ def extract_pages(pdf_path: str) -> list[tuple[int, str]]:
     with fitz.open(pdf_path) as pdf:
         for i, page in enumerate(pdf):
             text = _real_text(page.get_text())
-            if len(text) < 50:
+            # Divider pages like "1st Semester" are short but have no image: keep their text.
+            # Only pages that contain an image (scans, photos) are sent to OCR.
+            if len(text) < 50 and page.get_images():
                 print(f"  page {i + 1}: no real text layer, running OCR ...")
                 png = page.get_pixmap(dpi=200).tobytes("png")
                 text = ocr_image_bytes(png, "image/png", f"{base}.p{i + 1}")
             pages.append((i + 1, text))
     return pages
+
+
 def extract_image(image_path: str) -> list[tuple[int, str]]:
     ext = os.path.splitext(image_path)[1].lower()
     with open(image_path, "rb") as f:
@@ -258,6 +303,8 @@ def extract_image(image_path: str) -> list[tuple[int, str]]:
 
 
 def chunk_text(text: str, size: int = 800, overlap: int = 150) -> list[str]:
+    if not text:  # None or "" (e.g. a page with no readable text) must never crash indexing
+        return []
     chunks, i = [], 0
     while i < len(text):
         piece = text[i : i + size].strip()
@@ -287,34 +334,39 @@ def _store(pages: list[tuple[int, str]], title, category, document_id, file_url,
             metas.append({"page": page_no})
 
     if not texts:
+        # The old version (if any) is left untouched.
         print("  no readable text found (blurry photo? check the ocr_cache .txt file)")
         return 0
 
-    client = get_client()
-    batch, total = 32, 0
-    for start in range(0, len(texts), batch):
-        part = texts[start : start + batch]
+    # Embed everything FIRST. If OCR or embedding fails, the old version stays in Qdrant.
+    vectors = []
+    for start in range(0, len(texts), 32):
+        part = texts[start : start + 32]
         # the title is added to what gets embedded, which helps short notices match
-        vectors = embed([f"{title}\n{t}" for t in part])
-        points = [
-            PointStruct(
-                id=str(uuid.uuid4()),
-                vector=vec,
-                payload={
-                    "documentId": document_id,
-                    "title": title,
-                    "category": category,
-                    "page": metas[start + j]["page"],
-                    "fileUrl": file_url,
-                    "text": part[j],
-                    **(extra or {}),
-                },
-            )
-            for j, vec in enumerate(vectors)
-        ]
-        client.upsert(collection_name=COLLECTION, points=points)
-        total += len(points)
-    return total
+        vectors.extend(embed([f"{title}\n{t}" for t in part]))
+
+    points = [
+        PointStruct(
+            id=str(uuid.uuid4()),
+            vector=vec,
+            payload={
+                "documentId": document_id,
+                "title": title,
+                "category": category,
+                "page": metas[j]["page"],
+                "fileUrl": file_url,
+                "text": texts[j],
+                **(extra or {}),
+            },
+        )
+        for j, vec in enumerate(vectors)
+    ]
+
+    client = get_client()
+    delete_document(document_id)  # replace the old version only now
+    for start in range(0, len(points), 64):
+        client.upsert(collection_name=COLLECTION, points=points[start : start + 64])
+    return len(points)
 
 
 def ingest_file(
@@ -328,7 +380,6 @@ def ingest_file(
     The default document id comes from the file name, so re-running replaces the old version."""
     ensure_collection()
     document_id = document_id or str(uuid.uuid5(uuid.NAMESPACE_URL, os.path.basename(path)))
-    delete_document(document_id)
 
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
@@ -370,3 +421,14 @@ def search_chunks(query: str, limit: int = 5) -> list[dict]:
         for h in hits
         if h.score >= SCORE_THRESHOLD
     ]
+
+
+def search_multi(queries: list[str], limit: int = 8, keep: int = 12) -> list[dict]:
+    """Search with several phrasings and merge the results (duplicates removed, best first)."""
+    seen, out = set(), []
+    for q in queries:
+        for h in search_chunks(q, limit=limit):
+            if h["text"] not in seen:
+                seen.add(h["text"])
+                out.append(h)
+    return sorted(out, key=lambda x: -x["score"])[:keep]
