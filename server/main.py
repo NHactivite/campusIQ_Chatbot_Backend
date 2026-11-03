@@ -3,24 +3,25 @@ from dotenv import load_dotenv
 load_dotenv()  # must run before any os.environ[...] below
 
 import asyncio
+import base64
 import hmac
 import os
 
 import jwt
 import socketio
-import base64
-from app.services.tts_service import synthesize_to_mp3
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from jwt import PyJWKClient
 
 from app.docs_ingest import delete_source, sync_document
 from app.events_ingest import delete_event, sync_event
-from app.llm import get_conversation_history, stream_process_msg
 from app.history import delete_thread, get_messages, list_threads, save_exchange
+from app.jobs import enqueue
+from app.llm import stream_process_msg
+from app.services.tts_service import synthesize_to_mp3
 
-# comma-separated, e.g. "https://iic-sibsagar-frontend.vercel.app,http://localhost:3000"
-ALLOWED = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")]
+# comma-separated, e.g. "https://your-site.netlify.app,http://localhost:3000"
+ALLOWED = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
 jwks = PyJWKClient(os.environ["CLERK_JWKS_URL"])
 INGEST_SECRET = os.environ["INGEST_SECRET"]
 
@@ -47,34 +48,36 @@ def _check_secret(secret: str | None):
 
 
 @fastapi_app.post("/internal/events/sync")
-def events_sync(event: dict, bg: BackgroundTasks, x_ingest_secret: str | None = Header(None)):
+def events_sync(event: dict, x_ingest_secret: str | None = Header(None)):
     _check_secret(x_ingest_secret)
-    if not (event.get("_id") or event.get("id")):
+    eid = str(event.get("_id") or event.get("id") or "")
+    if not eid:
         raise HTTPException(status_code=400, detail="missing _id")
-    bg.add_task(sync_event, event)  # returns at once, indexing runs in the background
+    enqueue(f"event:{eid}", sync_event, event)  # one worker handles jobs in order
     return {"queued": True}
 
 
 @fastapi_app.delete("/internal/events/{event_id}")
-def events_delete(event_id: str, bg: BackgroundTasks, x_ingest_secret: str | None = Header(None)):
+def events_delete(event_id: str, x_ingest_secret: str | None = Header(None)):
     _check_secret(x_ingest_secret)
-    bg.add_task(delete_event, event_id)
+    enqueue(f"event:{event_id}", delete_event, event_id)  # replaces a waiting sync of the same event
     return {"queued": True}
 
 
 @fastapi_app.post("/internal/documents/sync")
-def documents_sync(doc: dict, bg: BackgroundTasks, x_ingest_secret: str | None = Header(None)):
+def documents_sync(doc: dict, x_ingest_secret: str | None = Header(None)):
     _check_secret(x_ingest_secret)
-    if not (doc.get("_id") or doc.get("id")):
+    did = str(doc.get("_id") or doc.get("id") or "")
+    if not did:
         raise HTTPException(status_code=400, detail="missing _id")
-    bg.add_task(sync_document, doc)
+    enqueue(f"doc:{did}", sync_document, doc)
     return {"queued": True}
 
 
 @fastapi_app.delete("/internal/documents/{doc_id}")
-def documents_delete(doc_id: str, bg: BackgroundTasks, x_ingest_secret: str | None = Header(None)):
+def documents_delete(doc_id: str, x_ingest_secret: str | None = Header(None)):
     _check_secret(x_ingest_secret)
-    bg.add_task(delete_source, doc_id)
+    enqueue(f"doc:{doc_id}", delete_source, doc_id)
     return {"queued": True}
 
 
@@ -99,6 +102,7 @@ def index_status(x_ingest_secret: str | None = Header(None)):
     if os.path.isdir(OCR_CACHE_DIR):
         cache = {f: os.path.getsize(os.path.join(OCR_CACHE_DIR, f)) for f in os.listdir(OCR_CACHE_DIR)}
     return {"ids": sorted(ids), "cache": cache}
+
 
 # routes above must be registered on fastapi_app BEFORE it is wrapped here
 app = socketio.ASGIApp(sio, other_asgi_app=fastapi_app)
@@ -132,6 +136,7 @@ def _tid(user_id: str, thread_id: str) -> str:
 async def human_message(sid, data):
     session = await sio.get_session(sid)
     user_id = session["user_id"]
+    data = data or {}
     text = (data.get("message") or "").strip()[:1000]
     thread = data.get("threadId") or ""
     lang = data.get("language") or "auto"
@@ -191,6 +196,7 @@ async def on_delete_thread(sid, data):
     session = await sio.get_session(sid)
     await asyncio.to_thread(delete_thread, session["user_id"], (data or {}).get("threadId") or "")
     await sio.emit("threads", await asyncio.to_thread(list_threads, session["user_id"]), to=sid)
+
 
 @sio.on("speak")
 async def on_speak(sid, data):

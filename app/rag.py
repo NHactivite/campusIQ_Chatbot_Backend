@@ -180,6 +180,20 @@ def _ocr_model_order() -> list[str]:
     rest = [m for m in [OCR_MODEL, *OCR_MODELS] if m != first]
     return [first] + list(dict.fromkeys(rest))
 
+def _tidy_ocr(text: str, max_chars: int = 8000) -> str:
+    """Drops lines repeated many times (an OCR loop) and caps the length."""
+    from collections import Counter
+
+    counts, out = Counter(), []
+    for line in text.splitlines():
+        key = line.strip()
+        if key:
+            counts[key] += 1
+            if counts[key] > 3:
+                continue
+        out.append(line)
+    return "\n".join(out)[:max_chars].strip()
+
 
 def ocr_image_bytes(data: bytes, mime: str, cache_key: str) -> str:
     """OCR one image with Gemini, trying several models. Result is cached in
@@ -188,7 +202,7 @@ def ocr_image_bytes(data: bytes, mime: str, cache_key: str) -> str:
     path = _cache_path(cache_key)
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
-            return f.read().strip()
+            return _tidy_ocr(f.read())  # <-- tidy old cached text too
 
     from langchain_core.messages import HumanMessage
 
@@ -213,30 +227,6 @@ def ocr_image_bytes(data: bytes, mime: str, cache_key: str) -> str:
                     err = str(e)
                     errors.append(f"{model_name}: {err[:120]}")
                     print(f"  [ocr] {model_name} failed ({type(e).__name__}: {err[:100]})")
-                    if "404" in err or "NOT_FOUND" in err:
-                        break  # model name does not exist: next model
-                    if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                        break  # quota used up: next model
-                    if attempt == 0:
-                        time.sleep(5)  # 503 / network: retry the same model once
-            if text is not None:
-                break
-        if text is not None:
-            break
-        if round_no == 0:
-            print("  [ocr] all models failed, waiting 30s and trying the list again ...")
-            time.sleep(30)
-
-    if text is None:
-        raise RuntimeError("OCR failed on every model:\n  " + "\n  ".join(errors[-6:]))
-
-    if text.upper() == "NO_TEXT":
-        text = ""
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
-    return text
-
-
 # ---------------- Extraction + chunking ----------------
 _WATERMARKS = ("scanned by camscanner", "camscanner", "scanned with", "scanned by")
 
