@@ -36,9 +36,9 @@ load_dotenv()
 # OCR models, tried in this order. If one is overloaded (503), out of quota (429) or does
 # not exist (404), the next one is used. Remove names that give 404 for your key.
 OCR_MODELS = [
-    "gemini-3.1-flash-lite",   # 500 requests a day, main model
-    "gemini-3.5-flash-lite",   # 500 requests a day
-    "gemma-4-26b-it",        
+    "gemini-3.5-flash-lite",  # Primary: document parsing
+    "gemini-3.1-flash-lite",  # Fallback: fast OCR
+    "gemma-4-26b-a4b-it",     # Additional vision fallback
 ]
 
 COLLECTION = "campusiq"
