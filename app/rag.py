@@ -11,6 +11,7 @@ rag.py - embeddings + Qdrant + PDF/photo ingestion (Gemini OCR) + search for Cam
     QDRANT_PATH=./qdrant_data
     SCORE_THRESHOLD=0.5          # tune with your own test questions
     OCR_CACHE_DIR=./ocr_cache
+    EMBED_PAUSE=20               # seconds to wait between embedding batches (gemini backend)
 """
 import base64
 import os
@@ -36,9 +37,9 @@ load_dotenv()
 # OCR models in priority order: best first. A model that is out of daily quota or does
 # not exist is blocked (see _block) and the next one is used.
 OCR_MODELS = [
-    "gemini-3.5-flash-lite",  # 1st: document parsing
-    "gemini-3.1-flash-lite",  # 2nd: fast OCR
-    "gemma-4-26b-a4b-it",     # 3rd: extra vision fallback
+    "gemini-3.1-flash-lite",
+    "gemma-4-26b-a4b-it",
+    "gemini-3.5-flash-lite",
 ]
 
 COLLECTION = "campusiq"
@@ -49,6 +50,8 @@ QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 QDRANT_PATH = os.getenv("QDRANT_PATH", "./qdrant_data")
 OCR_MODEL = os.getenv("GEMINI_OCR_MODEL") or None  # optional override, tried first
 OCR_CACHE_DIR = os.getenv("OCR_CACHE_DIR", "./ocr_cache")
+# Gemini embedding free tier is about 100 requests/min and 30K tokens/min: pause between batches.
+EMBED_PAUSE = float(os.getenv("EMBED_PAUSE", "20"))  # seconds between 32-chunk batches (gemini backend only)
 
 IMAGE_EXTS = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
 
@@ -92,15 +95,17 @@ _gemini_emb = None
 
 
 def _gemini_call(fn, *args):
-    for attempt in range(5):
+    # Per-minute quotas reset every 60s, so wait long enough (up to ~65s) and try more times.
+    tries = 8
+    for attempt in range(tries):
         try:
             return fn(*args)
         except Exception as e:
             s = f"{type(e).__name__} {e}".lower()
-            if attempt == 4 or not ("429" in s or "resource_exhausted" in s or "quota" in s):
+            if attempt == tries - 1 or not ("429" in s or "resource_exhausted" in s or "quota" in s):
                 raise
-            wait = 5 * (attempt + 1)
-            print(f"  [embed] rate limited, retrying in {wait}s")
+            wait = min(15 * (attempt + 1), 65)
+            print(f"  [embed] rate limited, retrying in {wait}s ({attempt + 1}/{tries - 1})")
             time.sleep(wait)
 
 
@@ -341,6 +346,8 @@ def _store(pages: list[tuple[int, str]], title, category, document_id, file_url,
     # Embed everything FIRST. If OCR or embedding fails, the old version stays in Qdrant.
     vectors = []
     for start in range(0, len(texts), 32):
+        if start and EMBED_BACKEND == "gemini":
+            time.sleep(EMBED_PAUSE)  # stay under the per-minute request/token quota
         part = texts[start : start + 32]
         # the title is added to what gets embedded, which helps short notices match
         vectors.extend(embed([f"{title}\n{t}" for t in part]))
