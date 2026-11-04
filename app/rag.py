@@ -42,9 +42,9 @@ load_dotenv()
 #     "gemini-3.5-flash-lite",
 # ]
 OCR_MODELS = [
-    "gemini-3.8-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",     # 500/day, your main model     # 500/day, backu          # stronger, but only 20/day
+    "gemini-3.8-flash",
     "gemini-3-flash-preview",    # also 20/day
     "gemma-4-26b-a4b-it",        # 14,400/day, last resort
 ]
