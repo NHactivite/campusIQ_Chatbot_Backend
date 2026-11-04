@@ -439,3 +439,48 @@ def search_multi(queries: list[str], limit: int = 8, keep: int = 12) -> list[dic
                 seen.add(h["text"])
                 out.append(h)
     return sorted(out, key=lambda x: -x["score"])[:keep]
+
+META = "campusiq_meta"
+
+
+def _ensure_meta():
+    c = get_client()
+    if not c.collection_exists(META):
+        c.create_collection(META, vectors_config=VectorParams(size=1, distance=Distance.COSINE))
+    for f in ("eventId", "sourceId"):
+        try:
+            c.create_payload_index(META, f, PayloadSchemaType.KEYWORD)
+        except Exception:
+            pass
+
+
+def mark_no_text(doc_id: str, owner_key: str, owner_id: str):
+    """Remember that OCR ran on this photo and found no text."""
+    _ensure_meta()
+    get_client().upsert(
+        META,
+        points=[PointStruct(
+            id=str(uuid.uuid5(uuid.NAMESPACE_URL, doc_id)),
+            vector=[1.0],
+            payload={"documentId": doc_id, owner_key: owner_id},
+        )],
+    )
+
+
+def clear_no_text(owner_key: str, owner_id: str):
+    c = get_client()
+    if c.collection_exists(META):
+        c.delete(META, points_selector=FilterSelector(
+            filter=Filter(must=[FieldCondition(key=owner_key, match=MatchValue(value=owner_id))])))
+
+
+def no_text_ids() -> list[str]:
+    c = get_client()
+    out, offset = [], None
+    if not c.collection_exists(META):
+        return out
+    while True:
+        pts, offset = c.scroll(META, limit=256, offset=offset, with_payload=["documentId"], with_vectors=False)
+        out += [p.payload["documentId"] for p in pts]
+        if offset is None:
+            return out

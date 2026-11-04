@@ -84,7 +84,7 @@ def documents_delete(doc_id: str, x_ingest_secret: str | None = Header(None)):
 @fastapi_app.get("/internal/index")
 def index_status(x_ingest_secret: str | None = Header(None)):
     _check_secret(x_ingest_secret)
-    from app.rag import COLLECTION, OCR_CACHE_DIR, get_client
+    from app.rag import COLLECTION, OCR_CACHE_DIR, get_client, no_text_ids
 
     client = get_client()
     ids: set[str] = set()
@@ -101,8 +101,7 @@ def index_status(x_ingest_secret: str | None = Header(None)):
     cache = {}
     if os.path.isdir(OCR_CACHE_DIR):
         cache = {f: os.path.getsize(os.path.join(OCR_CACHE_DIR, f)) for f in os.listdir(OCR_CACHE_DIR)}
-    return {"ids": sorted(ids), "cache": cache}
-
+    return {"ids": sorted(ids), "cache": cache, "empty": no_text_ids()}
 
 # routes above must be registered on fastapi_app BEFORE it is wrapped here
 app = socketio.ASGIApp(sio, other_asgi_app=fastapi_app)

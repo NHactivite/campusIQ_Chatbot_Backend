@@ -2,6 +2,8 @@
 import queue
 import threading
 
+from app import answer_cache
+
 _q: "queue.Queue[str]" = queue.Queue()
 _pending: dict = {}
 _lock = threading.Lock()
@@ -25,6 +27,8 @@ def _worker():
             fn(*args)
         except Exception as e:
             print(f"[jobs] {key} failed: {type(e).__name__}: {e}")
+        finally:
+            answer_cache.invalidate()  # knowledge changed, so old answers may be wrong
 
 
 threading.Thread(target=_worker, daemon=True, name="index-worker").start()

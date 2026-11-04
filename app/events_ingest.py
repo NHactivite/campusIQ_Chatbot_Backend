@@ -15,9 +15,11 @@ from app.rag import (
     COLLECTION,
     IMAGE_EXTS,
     _store,
+    clear_no_text,
     ensure_collection,
     extract_pages,
     get_client,
+    mark_no_text,
     ocr_image_bytes,
 )
 
@@ -85,9 +87,73 @@ def delete_event(event_id: str):
             filter=Filter(must=[FieldCondition(key="eventId", match=MatchValue(value=event_id))])
         ),
     )
+    clear_no_text("eventId", event_id)
 
 
 def sync_event(e: dict):
+    """Re-index one event from scratch. Runs in the background worker."""
+    event_id = str(e.get("_id") or e.get("id"))
+    title = e.get("title", "Event")
+    extra = {"eventId": event_id}
+
+    with _lock:
+        try:
+            ensure_collection()
+            delete_event(event_id)
+            clear_no_text("eventId", event_id)  # forget old "no text" markers
+
+            if e.get("isPublished") is False:
+                print(f"[events] {title!r} is a draft, removed from the chatbot index")
+                return
+
+            page_url = f"{PORTAL_URL}/dashboard/{e.get('slug', '')}"
+
+            # 1) event details
+            n = _store([(1, _event_text(e))], title, "events", f"event:{event_id}", page_url, extra)
+            print(f"[events] {title!r}: details -> {n} chunks")
+
+            # 2) PDF documents
+            for m in e.get("documents") or []:
+                name = m.get("originalName") or "document"
+                try:
+                    if _ext(m) != ".pdf":
+                        print(f"[events]   skipped {name} (only PDF is indexed)")
+                        continue
+                    with tempfile.TemporaryDirectory() as tmp:
+                        path = os.path.join(tmp, f"event_{event_id}_{m['_id']}.pdf")
+                        with open(path, "wb") as f:
+                            f.write(_download(m["url"]))
+                        pages = extract_pages(path)
+                    n = _store(pages, f"{title} - {name}", "events",
+                               f"event:{event_id}:doc:{m['_id']}", m["url"], extra)
+                    print(f"[events]   {name} -> {n} chunks")
+                except Exception as ex:
+                    print(f"[events]   FAILED {name}: {type(ex).__name__}: {ex}")
+
+            # 3) photos (OCR)
+            if INGEST_IMAGES:
+                for m in e.get("images") or []:
+                    name = m.get("originalName") or "photo"
+                    try:
+                        ext = _ext(m) or ".jpg"
+                        mime = IMAGE_EXTS.get(ext)
+                        if not mime:
+                            print(f"[events]   skipped {name} (unsupported image type)")
+                            continue
+                        text = ocr_image_bytes(_download(m["url"]), mime, f"event_{event_id}_{m['_id']}")
+                        if not text:
+                            # OCR ran fine: the photo simply has no text. Remember that.
+                            mark_no_text(f"event:{event_id}:img:{m['_id']}", "eventId", event_id)
+                            print(f"[events]   {name}: no readable text")
+                            continue
+                        text = f"Photo from event '{title}' ({_fmt_date(e.get('eventDate'))}):\n{text}"
+                        n = _store([(1, text)], f"{title} - photo", "events",
+                                   f"event:{event_id}:img:{m['_id']}", m["url"], extra)
+                        print(f"[events]   {name} -> {n} chunks")
+                    except Exception as ex:
+                        print(f"[events]   FAILED {name}: {type(ex).__name__}: {ex}")
+        except Exception as ex:
+            print(f"[events] sync failed for {title!r}: {type(ex).__name__}: {ex}")
     """Re-index one event from scratch. Runs in a background thread."""
     event_id = str(e.get("_id") or e.get("id"))
     title = e.get("title", "Event")
