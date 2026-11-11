@@ -20,6 +20,8 @@ from app.jobs import enqueue
 from app.llm import stream_process_msg
 from app.services.tts_service import synthesize_to_mp3
 
+from fastapi import Response
+from app.report import build_event_report
 # comma-separated, e.g. "https://your-site.netlify.app,http://localhost:3000"
 ALLOWED = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
 jwks = PyJWKClient(os.environ["CLERK_JWKS_URL"])
@@ -79,6 +81,18 @@ def documents_delete(doc_id: str, x_ingest_secret: str | None = Header(None)):
     _check_secret(x_ingest_secret)
     enqueue(f"doc:{doc_id}", delete_source, doc_id)
     return {"queued": True}
+
+@fastapi_app.post("/internal/events/report")
+def events_report(event: dict, x_ingest_secret: str | None = Header(None)):
+    _check_secret(x_ingest_secret)
+    if not (event.get("_id") or event.get("id")):
+        raise HTTPException(status_code=400, detail="missing _id")
+    try:
+        pdf = build_event_report(event)
+    except Exception as e:
+        print(f"[report] failed: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="report generation failed")
+    return Response(content=pdf, media_type="application/pdf")
 
 
 @fastapi_app.get("/internal/index")
